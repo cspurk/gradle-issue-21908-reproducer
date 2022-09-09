@@ -1,0 +1,143 @@
+plugins {
+    id 'ivy-publish'
+}
+
+
+class MyComponentPlugin implements Plugin<Project> {
+
+    static final Attribute<String> MY_ATTR1 =
+            Attribute.of('com.example.my1', String)
+    static final Attribute<String> MY_ATTR2 =
+            Attribute.of('com.example.my2', String)
+
+    SoftwareComponentFactory compFactory
+
+    @Inject
+    MyComponentPlugin(SoftwareComponentFactory compFactory) {
+        this.compFactory = compFactory
+    }
+
+    void apply(Project project) {
+        project.dependencies.attributesSchema {
+            attribute(MY_ATTR1)
+            attribute(MY_ATTR2)
+        }
+
+        project.configurations {
+            variant1Deps {
+                canBeResolved = true
+                canBeConsumed = false
+            }
+            variant2Deps {
+                canBeResolved = true
+                canBeConsumed = false
+            }
+            variant3Deps {
+                canBeResolved = true
+                canBeConsumed = false
+            }
+
+            variant1 {
+                canBeResolved = false
+                canBeConsumed = true
+                attributes {
+                    attribute(MY_ATTR1, 'a1ValueA')
+                    attribute(MY_ATTR2, 'a2ValueX')
+                }
+                extendsFrom variant1Deps
+            }
+            variant2 {
+                canBeResolved = false
+                canBeConsumed = true
+                attributes {
+                    attribute(MY_ATTR1, 'a1ValueA')
+                    attribute(MY_ATTR2, 'a2ValueY')
+                }
+                extendsFrom variant2Deps
+            }
+            variant3 {
+                canBeResolved = false
+                canBeConsumed = true
+                attributes {
+                    attribute(MY_ATTR1, 'a1ValueB')
+                    attribute(MY_ATTR2, 'a2ValueY')
+                }
+                extendsFrom variant3Deps
+            }
+        }
+
+        def myComponent = compFactory.adhoc('myComponent')
+        myComponent.addVariantsFromConfiguration(
+                project.configurations.variant1, {})
+        myComponent.addVariantsFromConfiguration(
+                project.configurations.variant2, {})
+        myComponent.addVariantsFromConfiguration(
+                project.configurations.variant3, {})
+        project.components.add(myComponent)
+    }
+}
+
+apply plugin: MyComponentPlugin
+
+
+group = 'com.example.mycompany'
+
+repositories.mavenCentral()
+dependencies {
+    // Any kinds of dependencies for the three variants, for example:
+    variant1Deps 'junit:junit:4.8.+'
+    variant2Deps 'com.google.guava:guava:11.0.+'
+}
+
+def dummyRepoDir = new File(buildDir, 'my_pub_repo')
+publishing {
+    publications {
+        myComponent(IvyPublication) {
+            from(components.myComponent)
+            versionMapping {
+                // OK: "MY_ATTR2=a2ValueX" is unique to variant1
+                variant(MyComponentPlugin.MY_ATTR2, 'a2ValueX') {
+                    fromResolutionOf(configurations.variant1Deps)
+                }
+                // OK: "MY_ATTR1=a1ValueB" is unique to variant3
+                variant(MyComponentPlugin.MY_ATTR1, 'a1ValueB') {
+                    fromResolutionOf(configurations.variant3Deps)
+                }
+                // TODO: how to uniquely specify a resolution configuration for
+                //   variant2 here? Neither "MY_ATTR2=a2ValueY" nor
+                //   "MY_ATTR1=a1valu2A" are unique to variant2!
+                //variant(…) {
+                //    fromResolutionOf(configurations.variant2Deps)
+                //}
+            }
+        }
+    }
+    repositories {
+        ivy {
+            name = 'dummy'
+            url = dummyRepoDir
+        }
+    }
+}
+
+tasks.register('reproducer', DefaultTask) {
+    dependsOn 'publish'
+    doLast {
+        def moduleDescrName = "$project.name-${project.version}.module"
+        def moduleJson = new groovy.json.JsonSlurper().parse(
+                  new File(dummyRepoDir, "$project.group/$project.name/"
+                          + "$project.version/$moduleDescrName"))
+        for (def variant : moduleJson.variants) {
+            for (def dep : variant.dependencies) {
+                def publishedDepVersion = dep.version.requires
+                if (publishedDepVersion.contains('+')) {
+                    throw new RuntimeException('The version of the "'
+                            + dep.module + '" dependency of ' + variant.name
+                            + ' was not resolved before it was published: '
+                            + publishedDepVersion)
+                }
+            }
+        }
+    }
+}
+
